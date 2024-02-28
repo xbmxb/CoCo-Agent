@@ -1,3 +1,3 @@
 # AAgent
 
-A mirror of my LLaVa-based Agent....
+Code for my GUI Agent.
