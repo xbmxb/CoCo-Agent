@@ -3,6 +3,8 @@ import torch
 import os
 import json, jsonlines
 from tqdm import tqdm
+import collections, re
+import string
 # import shortuuid
 
 # from llava.constants import IMAGE_TOKEN_INDEX, DEFAULT_IMAGE_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN
@@ -25,6 +27,50 @@ scroll_map = {
     "right": [[0.5, 0.2], [0.5, 0.8]]
 }
 
+def normalize_answer(s):
+    """Lower text and remove punctuation, articles and extra whitespace."""
+
+    def remove_articles(text):
+        regex = re.compile(r'\b(a|an|the)\b', re.UNICODE)
+        return re.sub(regex, ' ', text)
+
+    def white_space_fix(text):
+        return ' '.join(text.split())
+
+    def remove_punc(text):
+        exclude = set(string.punctuation)
+        return ''.join(ch for ch in text if ch not in exclude)
+
+    def lower(text):
+        return text.lower()
+
+    return white_space_fix(remove_articles(remove_punc(lower(s))))
+
+def get_tokens(s):
+    if not s:
+        return []
+    return normalize_answer(s).split()
+
+
+def compute_exact(a_gold, a_pred):
+    return int(normalize_answer(a_gold) == normalize_answer(a_pred))
+
+
+def compute_f1(a_gold, a_pred):
+    gold_toks = get_tokens(a_gold)
+    pred_toks = get_tokens(a_pred)
+    common = collections.Counter(gold_toks) & collections.Counter(pred_toks)
+    num_same = sum(common.values())
+    if len(gold_toks) == 0 or len(pred_toks) == 0:
+        # If either is no-answer, then F1 is 1 if they agree, 0 otherwise
+        return int(gold_toks == pred_toks)
+    if num_same == 0:
+        return 0
+    precision = 1.0 * num_same / len(pred_toks)
+    recall = 1.0 * num_same / len(gold_toks)
+    f1 = (2 * precision * recall) / (precision + recall)
+    return f1
+
 def split_list(lst, n):
     """Split a list into n (roughly) equal-sized chunks"""
     chunk_size = math.ceil(len(lst) / n)  # integer division
@@ -46,7 +92,7 @@ def eval_for_metrics(args):
         with open(args.answers_file, 'r') as pf:
             pred_data = json.load(pf)
 
-    data = load_for_owl('.', 'test')
+    data = load_for_owl('.', 'test', data_name=args.data_name)
     data = data[:len(pred_data)] # sequential
     # questions = data
     # questions = json.load(open(os.path.expanduser(args.question_file), "r"))[:10]
@@ -63,6 +109,11 @@ def eval_for_metrics(args):
     text_correct = 0
     type_correct = 0
     reference_test_positions = []
+    detailed_type = []
+    detailed_direction = []
+    detailed_target = []
+    detailed_text = []
+    detailed_dp = []
     # acc for each type
     cot_type_p = {
         '<STATUS_TASK_COMPLETE>': [0,0,0],
@@ -131,7 +182,10 @@ def eval_for_metrics(args):
         if '\nNext action:' in preds[idx]:
             preds[idx] = preds[idx].split('\nNext action:')[0]
         print(preds[idx])
-        cot1 = '<' + preds[idx].split('<')[1].split(">")[0] + '>'
+        try:
+            cot1 = '<' + preds[idx].split('<')[1].split(">")[0] + '>'
+        except IndexError:
+            print('======', idx, preds[idx])
         cot2 ='<' + reference_cot.split('<')[1].split(">")[0] + '>'
         if cot1 == cot2:
             cot_acc += 1
@@ -213,6 +267,8 @@ def eval_for_metrics(args):
 
         annotation_positions = reference_test_positions[idx]
 
+        
+        
         try:
             check_match = action_matching.check_actions_match(
                 action_1_touch_yx,
@@ -251,36 +307,84 @@ def eval_for_metrics(args):
         # cot type acc
         cot_type_p[cot2][0] += 1  # ground cot type count
         cot_type_r[cot1][0] += 1 
-
-    for k in cot_type_p.keys():
-        cot_type_p[k][1] = cot_type_p[k][1] / cot_type_p[k][0] * 100
-        cot_type_p[k][2] = cot_type_p[k][2] / cot_type_p[k][0] * 100
-        if cot_type_r[k][0] == 0:
-            cot_type_r[k][1] = 0
-            cot_type_r[k][2] = 0
+        if action_1_action_type == action_2_action_type:
+            detailed_type.append(1)
         else:
-            cot_type_r[k][1] = cot_type_r[k][1] / cot_type_r[k][0] * 100
-            cot_type_r[k][2] = cot_type_r[k][2] / cot_type_r[k][0] * 100
-        # print( 2 * cot_type_p[k][1] * cot_type_r[k][1] / (cot_type_p[k][1] + cot_type_r[k][1]))
-        # cot_type_f[k][0] = "{:.2f}".format(2 * cot_type_p[k][1] * cot_type_r[k][1] / (cot_type_p[k][1] + cot_type_r[k][1]))
-        # cot_type_f[k][1] = "{:.2f}".format(2 * cot_type_p[k][2] * cot_type_r[k][2] / (cot_type_p[k][2] + cot_type_r[k][2]))
-        cot_type_p[k][1] = "{:.2f}".format(cot_type_p[k][1])
-        cot_type_p[k][2] = "{:.2f}".format(cot_type_p[k][2])
-        cot_type_r[k][1] = "{:.2f}".format(cot_type_r[k][1])
-        cot_type_r[k][2] = "{:.2f}".format(cot_type_r[k][2])
+            detailed_type.append(0)
+        if action_1_action_type == 4 and action_2_action_type == 4 :
+            if [action_1_touch_yx, action_1_lift_yx] in scroll_map.values() and [action_2_touch_yx, action_2_lift_yx] in scroll_map.values():
+                if [action_1_touch_yx, action_1_lift_yx] == [action_2_touch_yx, action_2_lift_yx]:
+                    detailed_direction.append(1)
+                else:
+                    detailed_direction.append(0)
+            else:
+                detailed_target.append(int(check_match))
+        elif action_1_action_type != 4 and action_2_action_type != 4 :
+            detailed_direction.append(1)
+            detailed_target.append(1)
+        else:
+            detailed_direction.append(0)
+            detailed_target.append(0)
+        detailed_dp.append(int(check_match))
+        # if [action_1_touch_yx, action_1_lift_yx] in scroll_map.values() and [action_2_touch_yx, action_2_lift_yx] in scroll_map.values():
+        #     if [action_1_touch_yx, action_1_lift_yx] == [action_2_touch_yx, action_2_lift_yx]:
+        #         detailed_direction.append(1)
+        #         detailed_target.append(1)
+        #     else:
+        #         detailed_direction.append(0)
+        #         detailed_target.append(0)
+        # elif [action_1_touch_yx, action_1_lift_yx] in scroll_map.values():
+        #     detailed_direction.append(0)
+        # elif action_1_action_type == 4 and action_2_action_type == 4 :
+        #         # print(check_match)
+        #         detailed_target.append(int(check_match))
+        # elif [action_1_touch_yx, action_1_lift_yx] == [[-1.0, -1.0], [-1.0, -1.0]] and [action_2_touch_yx, action_2_lift_yx] == [[-1.0, -1.0], [-1.0, -1.0]]:
+        #     detailed_target.append(1)
+        #     detailed_direction.append(1)
+        # else:
+        #     detailed_target.append(0)
+        #     detailed_direction.append(0)
+            
+        if action_1_typed_text.strip() ==  action_2_typed_text.strip():
+            detailed_text.append(1)
+        else:
+            detailed_text.append(compute_f1(action_1_typed_text, action_2_typed_text))
+
+    # for k in cot_type_p.keys():
+    #     cot_type_p[k][1] = cot_type_p[k][1] / cot_type_p[k][0] * 100
+    #     cot_type_p[k][2] = cot_type_p[k][2] / cot_type_p[k][0] * 100
+    #     if cot_type_r[k][0] == 0:
+    #         cot_type_r[k][1] = 0
+    #         cot_type_r[k][2] = 0
+    #     else:
+    #         cot_type_r[k][1] = cot_type_r[k][1] / cot_type_r[k][0] * 100
+    #         cot_type_r[k][2] = cot_type_r[k][2] / cot_type_r[k][0] * 100
+    #     # print( 2 * cot_type_p[k][1] * cot_type_r[k][1] / (cot_type_p[k][1] + cot_type_r[k][1]))
+    #     # cot_type_f[k][0] = "{:.2f}".format(2 * cot_type_p[k][1] * cot_type_r[k][1] / (cot_type_p[k][1] + cot_type_r[k][1]))
+    #     # cot_type_f[k][1] = "{:.2f}".format(2 * cot_type_p[k][2] * cot_type_r[k][2] / (cot_type_p[k][2] + cot_type_r[k][2]))
+    #     cot_type_p[k][1] = "{:.2f}".format(cot_type_p[k][1])
+    #     cot_type_p[k][2] = "{:.2f}".format(cot_type_p[k][2])
+    #     cot_type_r[k][1] = "{:.2f}".format(cot_type_r[k][1])
+    #     cot_type_r[k][2] = "{:.2f}".format(cot_type_r[k][2])
         
-    metrics['cot_type_p'] = cot_type_p
-    metrics['cot_type_r'] = cot_type_r
-    metrics['cot_type_f'] = cot_type_f
+    # metrics['cot_type_p'] = cot_type_p
+    # metrics['cot_type_r'] = cot_type_r
+    # metrics['cot_type_f'] = cot_type_f
     metrics["cot_acc"] = "{:.2f}".format(cot_acc/len(targets) * 100)
     metrics["partial_acc"] = "{:.2f}".format(partial_correct/len(targets) * 100)
     metrics["text_acc"] = "{:.2f}".format(text_correct/len(targets) * 100)
     metrics["type_acc"] = "{:.2f}".format(type_correct/len(targets) * 100)
+    metrics["detailed_type"] = "{:.2f}".format(sum(detailed_type)/len(detailed_type) * 100)
+    metrics["detailed_direction"] = "{:.2f}".format(sum(detailed_direction)/len(detailed_direction) * 100)
+    metrics["detailed_target"] = "{:.2f}".format(sum(detailed_target)/len(detailed_target) * 100)
+    metrics["detailed_text"] = "{:.2f}".format(sum(detailed_text)/len(detailed_text) * 100)
+    metrics["detailed_dp"] = "{:.2f}".format(sum(detailed_dp)/len(detailed_dp) * 100)
     metrics["partial_correct"] = partial_correct
     metrics["text_correct"] = text_correct
     metrics["type_correct"] = type_correct
     metrics["total_num"] = len(targets)
     print(metrics)
+    print(len(detailed_target), len(detailed_direction))
     output_data_dic = {
         "metrics": metrics,
         "data": output_data
@@ -314,6 +418,7 @@ if __name__ == "__main__":
     parser.add_argument("--eval_name", type=str, default='debug_generations_res')
     parser.add_argument("--eval_data", type=str, default='/data/maxb/mmcot2/dataset/owl/general_parsed_episode_owl_train.obj')
     parser.add_argument('--save_path', type=str, default=None)
+    parser.add_argument('--data_name', type=str, default=None)
     args = parser.parse_args()
 
     eval_for_metrics(args)
@@ -432,3 +537,54 @@ if __name__ == "__main__":
 # python eval_aitw_cot.py --answers-file /data/maxb/tag/LLaVA/llava/eval/res_future/total_future2_llava_try-llama-2-7b-chat-finetune.jsonl --prd_output_path /data/maxb/tag/LLaVA/llava/eval/res_future --eval_name total
 
 # python eval_aitw_cot.py --answers-file /data/maxb/tag/LLaVA/llava/eval/res_multitask/bs16_6k_llava_try-llama-2-7b-chat-finetune.jsonl --prd_output_path /data/maxb/tag/LLaVA/llava/eval/res_multitask --eval_name bs16_6k
+# python eval_aitw_cot.py --answers-file /data/maxb/tag/LLaVA/llava/eval/res_multitask/bs16_9k_t02_llava_try-llama-2-7b-chat-finetune.jsonl --prd_output_path /data/maxb/tag/LLaVA/llava/eval/res_multitask --eval_name bs16_9k_t02
+# python eval_aitw_cot.py --answers-file /data/maxb/tag/LLaVA/llava/eval/res_multitask/3k_conti_9k_llava_try-llama-2-7b-chat-finetune.jsonl --prd_output_path /data/maxb/tag/LLaVA/llava/eval/res_future --eval_name 3k_conti_9k
+
+# python eval_aitw_cot.py --answers-file /data/maxb/tag/LLaVA/llava/eval/res_multitask/ep6_conti_bs12ep2_llava_try-llama-2-7b-chat-finetune.jsonl --prd_output_path /data/maxb/tag/LLaVA/llava/eval/res_multitask --eval_name ep6_conti_bs12ep2
+# python eval_aitw_cot.py --answers-file /data/maxb/tag/LLaVA/llava/eval/res_multitask/ep5_conti_bs12ep2_llava_try-llama-2-7b-chat-finetune.jsonl --prd_output_path /data/maxb/tag/LLaVA/llava/eval/res_multitask --eval_name ep5_conti_bs12ep2
+# python eval_aitw_cot.py --answers-file /data/maxb/tag/LLaVA/llava/eval/res_multitask/ep4_conti_bs12ep2_llava_try-llama-2-7b-chat-finetune.jsonl --prd_output_path /data/maxb/tag/LLaVA/llava/eval/res_multitask --eval_name ep4_conti_bs12ep2
+# python eval_aitw_cot.py --answers-file /data/maxb/tag/LLaVA/llava/eval/res_multitask/ep3_conti_bs12ep2_llava_try-llama-2-7b-chat-finetune.jsonl --prd_output_path /data/maxb/tag/LLaVA/llava/eval/res_multitask --eval_name ep3_conti_bs12ep2
+# python eval_aitw_cot.py --answers-file /data/maxb/tag/LLaVA/llava/eval/res_multitask/ep2_conti_bs12ep2_llava_try-llama-2-7b-chat-finetune.jsonl --prd_output_path /data/maxb/tag/LLaVA/llava/eval/res_multitask --eval_name ep2_conti_bs12ep2
+# python eval_aitw_cot.py --answers-file /data/maxb/tag/LLaVA/llava/eval/res_multitask/ep1_conti_bs12ep2_llava_try-llama-2-7b-chat-finetune.jsonl --prd_output_path /data/maxb/tag/LLaVA/llava/eval/res_multitask --eval_name ep1_conti_bs12ep2
+
+# python eval_aitw_cot.py --answers-file /data/maxb/tag/LLaVA/llava/eval/res_multitask/ep7_conti_bs12ep2_llava_try-llama-2-7b-chat-finetune.jsonl --prd_output_path /data/maxb/tag/LLaVA/llava/eval/res_multitask --eval_name ep7_conti_bs12ep2
+# python eval_aitw_cot.py --answers-file /data/maxb/tag/LLaVA/llava/eval/res_multitask/ep8_conti_bs12ep2_llava_try-llama-2-7b-chat-finetune.jsonl --prd_output_path /data/maxb/tag/LLaVA/llava/eval/res_multitask --eval_name ep8_conti_bs12ep2
+# python eval_aitw_cot.py --answers-file /data/maxb/tag/LLaVA/llava/eval/res_multitask/ep9_conti_bs12ep2_llava_try-llama-2-7b-chat-finetune.jsonl --prd_output_path /data/maxb/tag/LLaVA/llava/eval/res_multitask --eval_name ep9_conti_bs12ep2
+# python eval_aitw_cot.py --answers-file /data/maxb/tag/LLaVA/llava/eval/res_multitask/ep10_conti_bs12ep2_llava_try-llama-2-7b-chat-finetune.jsonl --prd_output_path /data/maxb/tag/LLaVA/llava/eval/res_multitask --eval_name ep10_conti_bs12ep2
+# python eval_aitw_cot.py --answers-file /data/maxb/tag/LLaVA/llava/eval/res_multitask/ep11_conti_bs12ep2_llava_try-llama-2-7b-chat-finetune.jsonl --prd_output_path /data/maxb/tag/LLaVA/llava/eval/res_multitask --eval_name ep11_conti_bs12ep2
+# python eval_aitw_cot.py --answers-file /data/maxb/tag/LLaVA/llava/eval/res_multitask/ep12_conti_bs12ep2_llava_try-llama-2-7b-chat-finetune.jsonl --prd_output_path /data/maxb/tag/LLaVA/llava/eval/res_multitask --eval_name ep12_conti_bs12ep2
+# python eval_aitw_cot.py --answers-file /data/maxb/tag/LLaVA/llava/eval/res_multitask/total_conti_bs12ep2_llava_try-llama-2-7b-chat-finetune.jsonl --prd_output_path /data/maxb/tag/LLaVA/llava/eval/res_multitask --eval_name total_conti_bs12ep2
+
+# episode
+# python eval_aitw_cot.py --answers-file /data/maxb/tag/LLaVA/llava/eval/res_episode/15686_conti_fullepisode_v1_ep3_try-llama-2-7b-chat-finetune.jsonl  --prd_output_path ./res_episode  --eval_name 15686_conti_fullepisode_v1_ep3
+# python eval_aitw_cot.py --answers-file /data/maxb/tag/LLaVA/llava/eval/res_episode/14260_conti_fullepisode_v1_ep3_try-llama-2-7b-chat-finetune.jsonl  --prd_output_path ./res_episode  --eval_name 14260_conti_fullepisode_v1_ep3
+# python eval_aitw_cot.py --answers-file /data/maxb/tag/LLaVA/llava/eval/res_episode/12834_conti_fullepisode_v1_ep3_try-llama-2-7b-chat-finetune.jsonl  --prd_output_path ./res_episode  --eval_name 12834_conti_fullepisode_v1_ep3
+# python eval_aitw_cot.py --answers-file /data/maxb/tag/LLaVA/llava/eval/res_episode/11408_conti_fullepisode_v1_ep3_try-llama-2-7b-chat-finetune.jsonl  --prd_output_path ./res_episode  --eval_name 11408_conti_fullepisode_v1_ep3
+# python eval_aitw_cot.py --answers-file /data/maxb/tag/LLaVA/llava/eval/res_episode/9986_conti_fullepisode_v1_ep3_try-llama-2-7b-chat-finetune.jsonl  --prd_output_path ./res_episode  --eval_name 9982_conti_fullepisode_v1_ep3
+# python eval_aitw_cot.py --answers-file /data/maxb/tag/LLaVA/llava/eval/res_episode/8556_conti_fullepisode_v1_ep3_try-llama-2-7b-chat-finetune.jsonl  --prd_output_path ./res_episode  --eval_name 8556_conti_fullepisode_v1_ep3
+# python eval_aitw_cot.py --answers-file /data/maxb/tag/LLaVA/llava/eval/res_episode/7130_conti_fullepisode_v1_ep3_try-llama-2-7b-chat-finetune.jsonl  --prd_output_path ./res_episode  --eval_name 7130_conti_fullepisode_v1_ep3
+# python eval_aitw_cot.py --answers-file /data/maxb/tag/LLaVA/llava/eval/res_episode/5704_conti_fullepisode_v1_ep3_try-llama-2-7b-chat-finetune.jsonl  --prd_output_path ./res_episode  --eval_name 5704_conti_fullepisode_v1_ep3
+
+# python eval_aitw_cot.py --answers-file /data/maxb/tag/LLaVA/llava/eval/res_episode/3207_conti_fullset_fullepisode_v1_ep3_try-llama-2-7b-chat-finetune.jsonl  --prd_output_path ./res_episode  --eval_name 3207_conti_fullset_fullepisode_v1_ep3
+# python eval_aitw_cot.py --answers-file /data/maxb/tag/LLaVA/llava/eval/res_episode/2138_conti_fullset_fullepisode_v1_ep3_try-llama-2-7b-chat-finetune.jsonl  --prd_output_path ./res_episode  --eval_name 2138_conti_fullset_fullepisode_v1_ep3
+# python eval_aitw_cot.py --answers-file /data/maxb/tag/LLaVA/llava/eval/res_episode/1069_conti_fullset_fullepisode_v1_ep3_try-llama-2-7b-chat-finetune.jsonl  --prd_output_path ./res_episode  --eval_name 1069_conti_fullset_fullepisode_v1_ep3
+# python eval_aitw_cot.py --answers-file /data/maxb/tag/LLaVA/llava/eval/res_episode/4276_conti_fullset_fullepisode_v1_ep3_try-llama-2-7b-chat-finetune.jsonl  --prd_output_path ./res_episode  --eval_name 4276_conti_fullset_fullepisode_v1_ep3
+# python eval_aitw_cot.py --answers-file /data/maxb/tag/LLaVA/llava/eval/res_episode/5345_conti_fullset_fullepisode_v1_ep3_try-llama-2-7b-chat-finetune.jsonl  --prd_output_path ./res_episode  --eval_name 5345_conti_fullset_fullepisode_v1_ep3
+# python eval_aitw_cot.py --answers-file /data/maxb/tag/LLaVA/llava/eval/res_episode/6414_conti_fullset_fullepisode_v1_ep3_try-llama-2-7b-chat-finetune.jsonl  --prd_output_path ./res_episode  --eval_name 6414_conti_fullset_fullepisode_v1_ep3
+# python eval_aitw_cot.py --answers-file /data/maxb/tag/LLaVA/llava/eval/res_episode/7483_conti_fullset_fullepisode_v1_ep3_try-llama-2-7b-chat-finetune.jsonl  --prd_output_path ./res_episode  --eval_name 7483_conti_fullset_fullepisode_v1_ep3
+
+# python eval_aitw_cot.py --answers-file /data/maxb/tag/LLaVA/llava/eval/res_episode/7130_nocoordinate_fullsetgoopre_try-llama-2-7b-chat-finetune.jsonl  --prd_output_path ./res_episode  --eval_name 7130_nocoordinate_fullsetgoopre
+# python eval_aitw_cot.py --answers-file /data/maxb/tag/LLaVA/llava/eval/res_episode/12834_nocoordinate_fullsetgoopre_try-llama-2-7b-chat-finetune.jsonl  --prd_output_path ./res_episode  --eval_name 12834_nocoordinate_fullsetgoopre
+# python eval_aitw_cot.py --answers-file /data/maxb/tag/LLaVA/llava/eval/res_episode/beam4_11408_nocoordinate_fullsetgoopre_try-llama-2-7b-chat-finetune.jsonl  --prd_output_path ./res_episode  --eval_name beam4_11408_nocoordinate_fullsetgoopre
+
+# python eval_aitw_cot.py --answers-file /data/maxb/tag/LLaVA/llava/eval/res_episode/8*4_2138_nocoordinate_fullsetgoopre_try-llama-2-7b-chat-finetune.jsonl  --prd_output_path ./res_episode --eval_name 8*4_2138_nocoordinate
+# python eval_aitw_cot.py --answers-file /data/maxb/tag/LLaVA/llava/eval/res_episode/8*4_4276_nocoordinate_fullsetgoopre_try-llama-2-7b-chat-finetune.jsonl  --prd_output_path ./res_episode --eval_name 8*4_4276_nocoordinate
+# python eval_aitw_cot.py --answers-file /data/maxb/tag/LLaVA/llava/eval/res_episode/8*4_6416_nocoordinate_fullsetgoopre_try-llama-2-7b-chat-finetune.jsonl  --prd_output_path ./res_episode --eval_name 8*4_6416_nocoordinate
+# python eval_aitw_cot.py --answers-file /data/maxb/tag/LLaVA/llava/eval/res_episode/8*4_8552_nocoordinate_fullsetgoopre_try-llama-2-7b-chat-finetune.jsonl  --prd_output_path ./res_episode --eval_name 8*4_8552_nocoordinate
+# python eval_aitw_cot.py --answers-file /data/maxb/tag/LLaVA/llava/eval/res_episode/8*4_10690_nocoordinate_fullsetgoopre_try-llama-2-7b-chat-finetune.jsonl  --prd_output_path ./res_episode --eval_name 8*4_10690_nocoordinate
+# python eval_aitw_cot.py --answers-file /data/maxb/tag/LLaVA/llava/eval/res_episode/8*4_12828_nocoordinate_fullsetgoopre_try-llama-2-7b-chat-finetune.jsonl  --prd_output_path ./res_episode --eval_name 8*4_12828_nocoordinate
+# python eval_aitw_cot.py --answers-file /data/maxb/tag/LLaVA/llava/eval/res_episode/8*4_14966_nocoordinate_fullsetgoopre_try-llama-2-7b-chat-finetune.jsonl  --prd_output_path ./res_episode --eval_name 8*4_14966_nocoordinate
+
+# percept fullset
+# python eval_aitw_cot.py --answers-file ./res_fullsetgoopre10/percept_5k_llava_try-llama-2-7b-chat-finetune.jsonl --prd_output_path ./res_fullsetgoopre10 --eval_name percept_5k
+# python eval_aitw_cot.py --answers-file /data/maxb/tag/LLaVA/llava/eval/res_fullsetgoopre10/percept/percept_35k_llava_try-llama-2-7b-chat-finetune.jsonl --prd_output_path /data/maxb/tag/LLaVA/llava/eval/res_fullsetgoopre10/percept/ --eval_name percept_35k
