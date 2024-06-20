@@ -15,7 +15,7 @@ This repo will be improved continually.
 @article{ma2024comprehensive,
   title={Comprehensive Cognitive LLM Agent for Smartphone GUI Automation},
   author={Ma, Xinbei and Zhang, Zhuosheng and Zhao, Hai},
-  journal={ACL2024 Findings},
+  journal={arXiv preprint arXiv:2402.11941},
   year={2024}
 }
 ```
